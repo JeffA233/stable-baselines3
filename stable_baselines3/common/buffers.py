@@ -70,6 +70,35 @@ class BaseBuffer(ABC):
             shape = (*shape, 1)
         return arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
 
+    @staticmethod
+    def swap_and_flatten_to_tensor(arr: np.ndarray) -> th.Tensor:
+        """
+        Swap and then flatten axes 0 (buffer_size) and 1 (n_envs)
+        to convert shape from [n_steps, n_envs, ...] (when ... is the shape of the features)
+        to [n_steps * n_envs, ...] (which maintain the order)
+
+        :param arr:
+        :return:
+        """
+        shape = arr.shape
+        if len(shape) < 3:
+            shape = shape + (1,)
+        return th.from_numpy(arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:]))
+
+    def swap_and_unflatten(self, arr: np.ndarray, second_dim: int = None) -> np.ndarray:
+        """
+        Undo what swap_and_flatten did
+        :param arr:
+        :param second_dim:
+        :return:
+        """
+        shape = arr.shape
+        if second_dim is None:
+            second_dim = shape[0]//self.n_envs
+        # if len(shape) < 3:
+        #     shape = shape + (1,)
+        return arr.reshape((self.n_envs, second_dim, *shape[1:])).swapaxes(1, 0)
+
     def size(self) -> int:
         """
         :return: The current size of the buffer
@@ -127,13 +156,17 @@ class BaseBuffer(ABC):
         Note: it copies the data by default
 
         :param array:
-        :param copy: Whether to copy or not the data (may be useful to avoid changing things
-            by reference). This argument is inoperative if the device is not the CPU.
+        :param copy: Whether to copy or not the data
+            (may be useful to avoid changing things be reference)
         :return:
         """
+        if isinstance(array, th.Tensor):
+            return array.to(device=self.device, non_blocking=True, copy=True)
         if copy:
-            return th.tensor(array, device=self.device)
-        return th.as_tensor(array, device=self.device)
+            # return th.tensor(array, device=self.device)
+            return th.from_numpy(array).to(device=self.device, non_blocking=True, copy=True)
+        # return th.as_tensor(array, device=self.device)
+        return th.from_numpy(array).to(device=self.device, non_blocking=True)
 
     @staticmethod
     def _normalize_obs(
@@ -438,23 +471,61 @@ class RolloutBuffer(BaseBuffer):
             obs = obs.reshape((self.n_envs, *self.obs_shape))
 
         # Reshape to handle multi-dim and discrete action spaces, see GH #970 #1392
-        action = action.reshape((self.n_envs, self.action_dim))
-
-        self.observations[self.pos] = np.array(obs).copy()
-        self.actions[self.pos] = np.array(action).copy()
-        self.rewards[self.pos] = np.array(reward).copy()
-        self.episode_starts[self.pos] = np.array(episode_start).copy()
-        self.values[self.pos] = value.clone().cpu().numpy().flatten()
-        self.log_probs[self.pos] = log_prob.clone().cpu().numpy()
+        self.observations[self.pos], self.actions[self.pos], self.rewards[self.pos], self.episode_starts[self.pos], \
+        self.values[self.pos], self.log_probs[self.pos] = obs.copy(), action.copy(), reward.copy(), \
+                                                          episode_start.copy(), value.clone().cpu().numpy().flatten(), \
+                                                          log_prob.clone().cpu().numpy()
         self.pos += 1
         if self.pos == self.buffer_size:
             self.full = True
+
+    def add_no_val(
+            self,
+            obs: np.ndarray,
+            action: np.ndarray,
+            reward: np.ndarray,
+            episode_start: np.ndarray,
+            log_prob: th.Tensor,
+    ) -> None:
+        """
+        :param obs: Observation
+        :param action: Action
+        :param reward:
+        :param episode_start: Start of episode signal.
+        :param log_prob: log probability of the action
+            following the current policy.
+        """
+
+        # Reshape needed when using multiple envs with discrete observations
+        # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
+        if isinstance(self.observation_space, spaces.Discrete):
+            obs = obs.reshape((self.n_envs,) + self.obs_shape)
+
+        if len(log_prob.shape) == 0:
+            # Reshape 0-d tensor to avoid error
+            log_prob = log_prob.reshape(-1, 1)
+
+        self.observations[self.pos], self.actions[self.pos], self.rewards[self.pos], self.episode_starts[self.pos], \
+        self.log_probs[self.pos] = obs.copy(), action.copy(), reward.copy(), episode_start.copy(), \
+                                   log_prob.clone().cpu().numpy()
+        self.pos += 1
+        if self.pos == self.buffer_size:
+            self.full = True
+
+    def set_values(self, values: th.Tensor):
+        numpy_vals = values.clone().cpu().numpy().flatten()
+        numpy_vals: np.ndarray
+        # print(f"numpy_vals shape: {numpy_vals.shape}")
+        # print(f"self.vals shape: {self.values.shape}")
+        # print(f"numpy_vals swapax: {self.swap_and_unflatten(numpy_vals).shape}")
+        self.values[self.pos_value] = self.swap_and_unflatten(numpy_vals)
 
     def get(self, batch_size: Optional[int] = None) -> Generator[RolloutBufferSamples, None, None]:
         assert self.full, ""
         indices = np.random.permutation(self.buffer_size * self.n_envs)
         # Prepare the data
         if not self.generator_ready:
+
             _tensor_names = [
                 "observations",
                 "actions",
@@ -465,7 +536,7 @@ class RolloutBuffer(BaseBuffer):
             ]
 
             for tensor in _tensor_names:
-                self.__dict__[tensor] = self.swap_and_flatten(self.__dict__[tensor])
+                self.__dict__[tensor] = self.swap_and_flatten_to_tensor(self.__dict__[tensor])
             self.generator_ready = True
 
         # Return everything, don't create minibatches
@@ -474,8 +545,47 @@ class RolloutBuffer(BaseBuffer):
 
         start_idx = 0
         while start_idx < self.buffer_size * self.n_envs:
-            yield self._get_samples(indices[start_idx : start_idx + batch_size])
+            yield self._get_samples(indices[start_idx: start_idx + batch_size])
             start_idx += batch_size
+
+    def get_non_rand(self, batch_size: Optional[int] = None) -> Generator[RolloutBufferSamples, None, None]:
+        assert self.full, ""
+        # indices = np.random.permutation(self.buffer_size * self.n_envs)
+        indices = np.arange(self.buffer_size)
+
+        self.batch_size = batch_size
+
+        # Return everything, don't create minibatches
+        if self.batch_size is None or self.buffer_size < self.batch_size:
+            self.batch_size = self.buffer_size
+
+        start_idx = 0
+        curr_index = 0
+
+        while curr_index < self.buffer_size:
+            self.pos_value = indices[start_idx: start_idx + self.batch_size]
+            yield self._get_obs_and_acts(self.pos_value)
+            # check if batch is too big for rest of buffer and modify batch size if necessary
+            curr_index += self.batch_size
+            if start_idx + self.batch_size > self.buffer_size:
+                self.batch_size = self.buffer_size - start_idx
+                start_idx = self.buffer_size - self.batch_size - 1
+            else:
+                start_idx += self.batch_size
+
+    def _get_obs_and_acts(self, batch_inds: np.ndarray) -> RolloutBufferSamples:
+        self.observations: np.ndarray
+        # print(f"buffer obs shape: {self.observations.shape}")  # (num envs, buffer size, obs size)
+        # print(f"swapax obs shape: {self.swap_and_flatten(self.observations[batch_inds]).shape}")
+        data = (
+            self.swap_and_flatten(self.observations[batch_inds]),
+            self.actions[batch_inds],
+            self.values[batch_inds].flatten(),
+            self.log_probs[batch_inds].flatten(),
+            self.advantages[batch_inds].flatten(),
+            self.returns[batch_inds].flatten(),
+        )
+        return RolloutBufferSamples(*tuple(map(self.to_torch, data)))
 
     def _get_samples(
         self,

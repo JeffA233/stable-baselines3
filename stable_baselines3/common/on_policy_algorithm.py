@@ -127,11 +127,11 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         self.policy = self.policy.to(self.device)
 
     def collect_rollouts(
-        self,
-        env: VecEnv,
-        callback: BaseCallback,
-        rollout_buffer: RolloutBuffer,
-        n_rollout_steps: int,
+            self,
+            env: VecEnv,
+            callback: BaseCallback,
+            rollout_buffer: RolloutBuffer,
+            n_rollout_steps: int,
     ) -> bool:
         """
         Collect experiences using the current policy and fill a ``RolloutBuffer``.
@@ -158,24 +158,34 @@ class OnPolicyAlgorithm(BaseAlgorithm):
 
         callback.on_rollout_start()
 
+        obs_tensor = obs_as_tensor(self._last_obs, self.device)
+
+        # progress_bar = tqdm.tqdm(desc=f"Collecting rollouts, step count", total=n_rollout_steps * self.n_envs,
+        #                          leave=False, smoothing=0.01)
+
         while n_steps < n_rollout_steps:
             if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
                 # Sample a new noise matrix
                 self.policy.reset_noise(env.num_envs)
 
-            with th.no_grad():
+            with no_grad():
                 # Convert to pytorch tensor or to TensorDict
-                obs_tensor = obs_as_tensor(self._last_obs, self.device)
-                actions, values, log_probs = self.policy(obs_tensor)
-            actions = actions.cpu().numpy()
+                dist = self.policy.get_distribution(obs_tensor)
+                actions = dist.get_actions()
+                log_probs = dist.log_prob(actions)
+                actions: Tensor
+                actions = actions.cpu().numpy()
+            actions: ndarray
 
             # Rescale and perform action
-            clipped_actions = actions
             # Clip the actions to avoid out of bound error
-            if isinstance(self.action_space, spaces.Box):
-                clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+            if isinstance(self.action_space, Box):
+                # clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+                actions.clip(self.action_space.low, self.action_space.high, out=actions)
 
-            new_obs, rewards, dones, infos = env.step(clipped_actions)
+            new_obs, rewards, dones, infos = env.step(actions)
+
+            obs_tensor = obs_as_tensor(new_obs, self.device)
 
             self.num_timesteps += env.num_envs
 
@@ -187,7 +197,7 @@ class OnPolicyAlgorithm(BaseAlgorithm):
             self._update_info_buffer(infos)
             n_steps += 1
 
-            if isinstance(self.action_space, spaces.Discrete):
+            if isinstance(self.action_space, Discrete):
                 # Reshape in case of discrete action
                 actions = actions.reshape(-1, 1)
 
@@ -195,31 +205,38 @@ class OnPolicyAlgorithm(BaseAlgorithm):
             # see GitHub issue #633
             for idx, done in enumerate(dones):
                 if (
-                    done
-                    and infos[idx].get("terminal_observation") is not None
-                    and infos[idx].get("TimeLimit.truncated", False)
+                        done
+                        and infos[idx].get("terminal_observation") is not None
+                        and infos[idx].get("TimeLimit.truncated", False)
                 ):
                     terminal_obs = self.policy.obs_to_tensor(infos[idx]["terminal_observation"])[0]
-                    with th.no_grad():
-                        terminal_value = self.policy.predict_values(terminal_obs)[0]  # type: ignore[arg-type]
+                    with no_grad():
+                        terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
-            rollout_buffer.add(
-                self._last_obs,  # type: ignore[arg-type]
-                actions,
-                rewards,
-                self._last_episode_starts,  # type: ignore[arg-type]
-                values,
-                log_probs,
-            )
-            self._last_obs = new_obs  # type: ignore[assignment]
-            self._last_episode_starts = dones
+            rollout_buffer.add_no_val(self._last_obs, actions, rewards, self._last_episode_starts, log_probs)
+            # rollout_buffer.add(self._last_obs, actions, rewards, self._last_episode_starts, None, None)
+            self._last_obs, self._last_episode_starts = new_obs, dones
+            # self._last_episode_starts = dones
 
-        with th.no_grad():
-            # Compute value for the last timestep
-            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+            # progress_bar.update(self.n_envs)
 
-        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
+        # progress_bar.set_description(f"Inferring values")
+
+        # compute values of the rollout and get the final value for calculation,
+        # faster than computing a value for each obs while collecting rollouts as what original did
+        with no_grad():
+            for rollout_data in rollout_buffer.get_non_rand(self.batch_size // self.n_envs):
+                # Re-sample the noise matrix because the log_std has changed
+                if self.use_sde:
+                    self.policy.reset_noise(self.batch_size)
+
+                values = self.policy.predict_values(rollout_data.observations)
+                rollout_buffer.set_values(values)
+            value = self.policy.predict_values(obs_tensor)
+
+        # progress_bar.set_description(f"Calculating returns")
+        rollout_buffer.compute_returns_and_advantage(last_values=value, dones=dones.astype(int).astype(float))
 
         callback.on_rollout_end()
 
@@ -273,6 +290,9 @@ class OnPolicyAlgorithm(BaseAlgorithm):
                 if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
                     self.logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
                     self.logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
+                    # new
+                    self.logger.record("rollout/ep_rew_per_len", ep_rew_mean/ep_len_mean)
+                    #
                 self.logger.record("time/fps", fps)
                 self.logger.record("time/time_elapsed", int(time_elapsed), exclude="tensorboard")
                 self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")

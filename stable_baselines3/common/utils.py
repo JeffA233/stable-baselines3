@@ -471,7 +471,9 @@ def polyak_update(
             th.add(target_param.data, param.data, alpha=tau, out=target_param.data)
 
 
-def obs_as_tensor(obs: Union[np.ndarray, Dict[str, np.ndarray]], device: th.device) -> Union[th.Tensor, TensorDict]:
+def obs_as_tensor(
+    obs: Union[np.ndarray, Dict[Union[str, int], np.ndarray]], device: th.device
+) -> Union[th.Tensor, TensorDict]:
     """
     Moves the observation to the given device.
 
@@ -480,9 +482,11 @@ def obs_as_tensor(obs: Union[np.ndarray, Dict[str, np.ndarray]], device: th.devi
     :return: PyTorch tensor of the observation on a desired device.
     """
     if isinstance(obs, np.ndarray):
-        return th.as_tensor(obs, device=device)
+        # return th.as_tensor(obs).to(device, non_blocking=True)
+        # return th.as_tensor(obs, device=device)
+        return th.from_numpy(obs).to(device=device, non_blocking=True, copy=False)
     elif isinstance(obs, dict):
-        return {key: th.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
+        return {key: th.as_tensor(_obs).to(device, non_blocking=True) for (key, _obs) in obs.items()}
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
 
