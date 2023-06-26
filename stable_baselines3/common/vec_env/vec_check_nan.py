@@ -2,6 +2,7 @@ import warnings
 from typing import List, Tuple
 
 import numpy as np
+import torch as th
 from gymnasium import spaces
 
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvObs, VecEnvStepReturn, VecEnvWrapper
@@ -74,6 +75,8 @@ class VecCheckNan(VecEnvWrapper):
         for name, value in kwargs.items():
             if isinstance(value, (np.ndarray, list)):
                 found += self.check_array_value(name, np.asarray(value))
+            if isinstance(value, th.Tensor):
+                found += self.check_array_value(name, value.cpu().numpy())
             elif isinstance(value, dict):
                 for inner_name, inner_val in value.items():
                     found += self.check_array_value(f"{name}.{inner_name}", inner_val)
