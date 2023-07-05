@@ -1,10 +1,17 @@
+| **List of changes** |
+|---------------------|
+|-Changed on_policy_algorithm.py's collect_rollouts() to batch values all at once (with minibatches) instead of at each step |
+|-Adjusted on_policy_algorithm.py's collect_rollouts() to do the observation ndarray -> Tensor conversion as early in the loop as possible |
+|-Tried to add non_blocking=True (and hence trying to make it asynchronous) to as many crucial CPU-GPU or GPU-CPU transfers as possible such as obs_to_tensor() |
+|-Removed redundant copy of ndarrays in RolloutBuffer's add() |
+|-Additionally put most of the operations in RolloutBuffer's add() on one line for a tiny performance gain which was basically unnecessary |
+|-Added a workaround Tensor to ndarray conversion in vec_check_nan.py, also unnecessary |
 <img src="docs/\_static/img/logo.png" align="right" width="40%"/>
 
 <!-- [![pipeline status](https://gitlab.com/araffin/stable-baselines3/badges/master/pipeline.svg)](https://gitlab.com/araffin/stable-baselines3/-/commits/master) -->
 ![CI](https://github.com/DLR-RM/stable-baselines3/workflows/CI/badge.svg)
 [![Documentation Status](https://readthedocs.org/projects/stable-baselines/badge/?version=master)](https://stable-baselines3.readthedocs.io/en/master/?badge=master) [![coverage report](https://gitlab.com/araffin/stable-baselines3/badges/master/coverage.svg)](https://gitlab.com/araffin/stable-baselines3/-/commits/master)
 [![codestyle](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-
 
 # Stable Baselines3
 
