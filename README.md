@@ -6,6 +6,7 @@
 |-Removed redundant copy of ndarrays in RolloutBuffer's add() |
 |-Additionally put most of the operations in RolloutBuffer's add() on one line for a tiny performance gain which was basically unnecessary |
 |-Added a workaround Tensor to ndarray conversion in vec_check_nan.py, also unnecessary |
+|-Added ability to turn off _clip_grad_norm() in ppo.py with max_grad_norm=0, was a major performance hit until PyTorch removed the CPU-GPU synchronization call in this function (since something like PyTorch ver 1.9), now unnecessary |
 <img src="docs/\_static/img/logo.png" align="right" width="40%"/>
 
 <!-- [![pipeline status](https://gitlab.com/araffin/stable-baselines3/badges/master/pipeline.svg)](https://gitlab.com/araffin/stable-baselines3/-/commits/master) -->
